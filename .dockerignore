@@ -1,0 +1,9 @@
+.git
+.github
+.gitignore
+.dockerignore
+.env
+.env.example
+compose.yaml
+Dockerfile
+README-FORK.md

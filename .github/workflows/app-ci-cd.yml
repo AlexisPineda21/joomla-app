@@ -1,0 +1,159 @@
+# CI/CD de la aplicacion (opcion A).
+#   Pull request a main -> CI: lint, build de la imagen y prueba con MySQL + Valkey.
+#   Push a main         -> CI y luego CD: push a ECR, despliegue en ECS, smoke test
+#                          y rollback automatico a la imagen anterior si algo falla.
+# Las variables (vars.*) las crea Terraform en iac-joomla-aws/bootstrap.
+name: app-ci-cd
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-ci-cd-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  ci:
+    name: CI - lint, build y prueba
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Lint de PHP y Bash
+        run: |
+          php -l health.php
+          php -l docker/configure-joomla.php
+          shellcheck docker/start-joomla.sh docker/apache2-joomla-init .github/scripts/*.sh
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build de la imagen
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: joomla-app:ci
+          build-args: APP_COMMIT=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Prueba del contenedor con MySQL y Valkey
+        env:
+          APP_IMAGE: joomla-app:ci
+          EXPECTED_COMMIT: ${{ github.sha }}
+        run: |
+          DB_PASSWORD="$(openssl rand -hex 12)"
+          DB_ROOT_PASSWORD="$(openssl rand -hex 12)"
+          ADMIN_PASSWORD="$(openssl rand -hex 12)"
+          export DB_PASSWORD DB_ROOT_PASSWORD ADMIN_PASSWORD
+          docker compose up -d --no-build --wait --wait-timeout 420
+          curl -fsS http://localhost:8080/health.php | tee health.json
+          echo
+          grep -q "\"commit\":\"$EXPECTED_COMMIT\"" health.json
+          curl -fsS -o /dev/null http://localhost:8080/
+          echo "Joomla se instalo y responde con la imagen nueva"
+
+      - name: Logs del contenedor
+        if: always()
+        run: docker logs --tail 150 joomla-app-joomla-1 || true
+
+  deploy:
+    name: CD - publicar en ECR y desplegar en ECS
+    needs: ci
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    environment:
+      name: production
+      url: ${{ steps.app.outputs.url }}
+    concurrency:
+      group: app-production
+      cancel-in-progress: false
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+      ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
+      ECS_SERVICE: ${{ vars.ECS_SERVICE }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Credenciales temporales de AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Login en Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Imagen actual en produccion (para el rollback)
+        id: previous
+        run: |
+          digest=$(aws ecr describe-images --repository-name "$ECR_REPOSITORY" \
+            --image-ids imageTag=latest --query 'imageDetails[0].imageDigest' \
+            --output text 2>/dev/null || true)
+          if [ "$digest" = "None" ]; then digest=""; fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "Imagen anterior: ${digest:-ninguna}"
+
+      - uses: docker/setup-buildx-action@v4
+
+      - name: Build y push a Amazon ECR
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          provenance: false
+          sbom: false
+          tags: |
+            ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:${{ github.sha }}
+            ${{ steps.ecr.outputs.registry }}/${{ vars.ECR_REPOSITORY }}:latest
+          build-args: APP_COMMIT=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Estado de la infraestructura
+        id: app
+        env:
+          URL_PARAMETER: ${{ vars.APP_URL_PARAMETER }}
+        run: |
+          url=$(aws ssm get-parameter --name "$URL_PARAMETER" \
+            --query Parameter.Value --output text 2>/dev/null || true)
+          active=$(aws ecs describe-services --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" \
+            --query "length(services[?status=='ACTIVE'])" --output text 2>/dev/null || echo 0)
+          if [ -z "$url" ] || [ "$active" != "1" ]; then
+            echo "::notice::La infraestructura aun no existe. La imagen quedo en ECR y el servicio la usara cuando iac-joomla-aws lo cree."
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+            echo "url=$url" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Despliegue en ECS (rolling update)
+        if: steps.app.outputs.deploy == 'true'
+        run: bash .github/scripts/ecs-deploy.sh
+
+      - name: Smoke test
+        if: steps.app.outputs.deploy == 'true'
+        run: bash .github/scripts/smoke-test.sh "${{ steps.app.outputs.url }}" "$GITHUB_SHA"
+
+      - name: Rollback a la imagen anterior
+        if: failure() && steps.app.outputs.deploy == 'true' && steps.previous.outputs.digest != ''
+        env:
+          PREVIOUS_DIGEST: ${{ steps.previous.outputs.digest }}
+        run: |
+          bash .github/scripts/ecr-retag.sh "$PREVIOUS_DIGEST"
+          bash .github/scripts/ecs-deploy.sh
+          echo "::error::El despliegue de $GITHUB_SHA fallo; se restauro la imagen $PREVIOUS_DIGEST"

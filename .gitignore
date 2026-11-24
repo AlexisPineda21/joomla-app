@@ -1,0 +1,5 @@
+# Variables locales de Docker Compose (contrasenas)
+.env
+
+# Archivos que crea Joomla al instalarse en local
+/configuration.php

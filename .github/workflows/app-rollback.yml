@@ -1,0 +1,65 @@
+# Rollback manual: vuelve a publicar una imagen anterior que ya esta en ECR.
+# Actions -> app-rollback -> Run workflow -> tag de la imagen (SHA completo del commit).
+name: app-rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "SHA completo del commit a restaurar (es el tag de la imagen en ECR)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  rollback:
+    name: Restaurar imagen en ECS
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment:
+      name: production
+      url: ${{ steps.app.outputs.url }}
+    concurrency:
+      group: app-production
+      cancel-in-progress: false
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+      ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
+      ECS_SERVICE: ${{ vars.ECS_SERVICE }}
+      IMAGE_TAG: ${{ inputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Validar el tag
+        run: |
+          if ! [[ $IMAGE_TAG =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::El tag debe ser el SHA completo del commit (40 caracteres hexadecimales)"
+            exit 1
+          fi
+
+      - name: Credenciales temporales de AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: URL del sitio
+        id: app
+        env:
+          URL_PARAMETER: ${{ vars.APP_URL_PARAMETER }}
+        run: |
+          url=$(aws ssm get-parameter --name "$URL_PARAMETER" --query Parameter.Value --output text)
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Apuntar latest a la imagen elegida
+        run: bash .github/scripts/ecr-retag.sh "$IMAGE_TAG"
+
+      - name: Despliegue en ECS
+        run: bash .github/scripts/ecs-deploy.sh
+
+      - name: Smoke test
+        run: bash .github/scripts/smoke-test.sh "${{ steps.app.outputs.url }}" "$IMAGE_TAG"

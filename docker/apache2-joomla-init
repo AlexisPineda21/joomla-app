@@ -1,0 +1,5 @@
+#!/bin/sh
+# Comando vacio. /entrypoint.sh solo prepara Joomla (base de datos e instalacion)
+# cuando el comando empieza por "apache2"; start-joomla.sh lo llama con este
+# nombre para que la preparacion ocurra sin arrancar Apache.
+echo "[start-joomla] Preparacion de Joomla terminada"

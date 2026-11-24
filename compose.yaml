@@ -1,0 +1,77 @@
+# ---------------------------------------------------------------------------
+# Prueba local de la imagen, con la misma arquitectura que en AWS:
+#   joomla   -> imagen de este repositorio       (ECS Fargate)
+#   database -> MySQL 8.4                         (Amazon RDS for MySQL)
+#   cache    -> Valkey 8.0                        (Amazon ElastiCache for Valkey)
+#   joomla-data                                   (Amazon EFS)
+#
+# Uso:  cp .env.example .env    (y cambia las contrasenas)
+#       docker compose up -d --build --wait
+#       Abre http://localhost:8080 y http://localhost:8080/health.php
+#
+# El pipeline usa este mismo archivo para probar la imagen antes de publicarla.
+# ---------------------------------------------------------------------------
+name: joomla-app
+
+services:
+  database:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: joomladb
+      MYSQL_USER: joomlauser
+      MYSQL_PASSWORD: ${DB_PASSWORD:?Define DB_PASSWORD en el archivo .env}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?Define DB_ROOT_PASSWORD en el archivo .env}
+    volumes:
+      - db-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  cache:
+    image: valkey/valkey:8.0
+    command: ["valkey-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  joomla:
+    image: ${APP_IMAGE:-joomla-app:local}
+    build: .
+    depends_on:
+      database:
+        condition: service_healthy
+      cache:
+        condition: service_healthy
+    environment:
+      JOOMLA_DB_HOST: database:3306
+      JOOMLA_DB_NAME: joomladb
+      JOOMLA_DB_USER: joomlauser
+      JOOMLA_DB_PASSWORD: ${DB_PASSWORD}
+      JOOMLA_DB_TYPE: mysqli
+      JOOMLA_SITE_NAME: "Joomla local - Actividad 6"
+      JOOMLA_ADMIN_USER: Administrador
+      JOOMLA_ADMIN_USERNAME: admin
+      JOOMLA_ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Define ADMIN_PASSWORD en el archivo .env}
+      JOOMLA_ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
+      JOOMLA_REDIS_HOST: cache
+      JOOMLA_REDIS_PORT: "6379"
+      FAULT_INJECTION: enabled
+    volumes:
+      - joomla-data:/mnt/joomla-data
+    ports:
+      - "8080:80"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost/health.php"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 300s
+
+volumes:
+  db-data:
+  joomla-data:

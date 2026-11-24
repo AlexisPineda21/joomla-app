@@ -1,0 +1,23 @@
+@charset "UTF-8";
+/*
+ * Personalizacion del sitio. La plantilla Cassiopeia carga este archivo sola
+ * (recurso "template.user"). Un cambio aqui, al llegar a main, dispara el
+ * pipeline y se publica en ECS sin tocar la infraestructura.
+ */
+:root {
+  --app-accent: #1f4e79;
+}
+
+.container-header {
+  background-color: var(--app-accent);
+  background-image: none;
+}
+
+.container-header .navbar-brand::after {
+  content: "Versión 1 · desplegada con GitHub Actions";
+  display: block;
+  margin-top: .25rem;
+  font-size: .85rem;
+  font-weight: 400;
+  opacity: .85;
+}
