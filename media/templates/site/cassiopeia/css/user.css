@@ -5,7 +5,7 @@
  * pipeline y se publica en ECS sin tocar la infraestructura.
  */
 :root {
-  --app-accent: #1f4e79;
+  --app-accent: #2e7d32;
 }
 
 .container-header {
@@ -14,7 +14,7 @@
 }
 
 .container-header .navbar-brand::after {
-  content: "Versión 1 · desplegada con GitHub Actions";
+  content: "Versión 2 · desplegada con GitHub Actions";
   display: block;
   margin-top: .25rem;
   font-size: .85rem;
